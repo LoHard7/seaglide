@@ -1,0 +1,209 @@
+#include <TFT_eSPI.h>
+#include <SPI.h>
+#include <math.h>
+
+// Display e sprite
+TFT_eSPI tft = TFT_eSPI();
+TFT_eSprite horizon = TFT_eSprite(&tft);
+
+// Pinos
+int pitchPin = 34;
+int rollPin = 35;
+int resetPin = 32;
+int switchViewPin = 13;
+
+// Estado
+bool usandoSensor = false;
+bool switchButtonPressed = false;
+
+// Horizonte (potenciômetro)
+float pitch = 0;
+float roll = 0;
+float pitchZero = 0;
+float rollZero = 0;
+bool resetButtonPressed = false;
+unsigned long buttonPressTime = 0;
+
+// Horizonte (sensor)
+HardwareSerial UltraSerial(2);
+const int RX_PIN = 18;
+const int TX_PIN = 19;
+unsigned char data_buffer[4] = {0};
+float distance = 0;
+float targetPitch = 0;
+
+// Timer
+unsigned long lastUpdate = 0;
+
+// ===== DECLARAÇÕES DE FUNÇÕES =====
+void desenharHorizonte(float pitch, float roll, float mostrarDist = -1);
+void desenharLinhaPitch(int cx, int cy, float offset, float rollRad);
+
+// ===== SETUP =====
+void setup() {
+  tft.init();
+  tft.setRotation(2);
+  tft.fillScreen(TFT_BLACK);
+
+  horizon.setColorDepth(8);
+  horizon.createSprite(240, 240);
+
+  pinMode(pitchPin, INPUT);
+  pinMode(rollPin, INPUT);
+  pinMode(resetPin, INPUT_PULLUP);
+  pinMode(switchViewPin, INPUT_PULLUP);
+
+  UltraSerial.begin(9600, SERIAL_8N1, RX_PIN, TX_PIN);
+}
+
+// ===== LOOP =====
+void loop() {
+  if (digitalRead(switchViewPin) == LOW && !switchButtonPressed) {
+    switchButtonPressed = true;
+    usandoSensor = !usandoSensor;
+    tft.fillScreen(TFT_BLACK);
+  }
+  if (digitalRead(switchViewPin) == HIGH) {
+    switchButtonPressed = false;
+  }
+
+  if (usandoSensor) {
+    atualizarComSensor();
+  } else {
+    atualizarComPotenciometro();
+  }
+}
+
+// ===== MODO POTENCIÔMETRO =====
+void atualizarComPotenciometro() {
+  if (millis() - lastUpdate > 50) {
+    lastUpdate = millis();
+
+    if (digitalRead(resetPin) == LOW) {
+      if (!resetButtonPressed) {
+        resetButtonPressed = true;
+        buttonPressTime = millis();
+        pitchZero = map(analogRead(pitchPin), 0, 4095, -90, 90);
+        rollZero = map(analogRead(rollPin), 0, 4095, -90, 90);
+      }
+      if (millis() - buttonPressTime >= 3000) {
+        pitchZero = 0;
+        rollZero = 0;
+      }
+    }
+
+    if (digitalRead(resetPin) == HIGH && resetButtonPressed) {
+      resetButtonPressed = false;
+    }
+
+    pitch = map(analogRead(pitchPin), 0, 4095, -90, 90) - pitchZero;
+    roll = map(analogRead(rollPin), 0, 4095, -90, 90) - rollZero;
+
+    desenharHorizonte(pitch, roll);
+  }
+}
+
+// ===== MODO SENSOR =====
+void atualizarComSensor() {
+  if (millis() - lastUpdate > 50) {
+    lastUpdate = millis();
+
+    int newDist = lerUltrassom();
+    if (newDist >= 0) {
+      distance = newDist;
+      distance = constrain(distance, 0, 450);
+      targetPitch = map(distance, 0, 450, 120, -120);
+    }
+
+    pitch = pitch * 0.9 + targetPitch * 0.1;
+
+    desenharHorizonte(pitch, 0, distance);
+  }
+}
+
+int lerUltrassom() {
+  while (UltraSerial.available() >= 4) {
+    if (UltraSerial.read() == 0xFF) {
+      data_buffer[0] = 0xFF;
+      for (int i = 1; i < 4; i++) {
+        data_buffer[i] = UltraSerial.read();
+      }
+
+      unsigned char checksum = (data_buffer[0] + data_buffer[1] + data_buffer[2]) & 0xFF;
+      if (data_buffer[3] == checksum) {
+        int dist_mm = (data_buffer[1] << 8) + data_buffer[2];
+        return dist_mm / 10;
+      }
+    }
+  }
+  return -1;
+}
+
+// ===== DESENHO DO HORIZONTE =====
+void desenharHorizonte(float pitch, float roll, float mostrarDist) {
+  int cx = 120;
+  int cy = 120;
+
+  float rollRad = roll * DEG_TO_RAD;
+  float pitchOffset = pitch * 1.0;
+
+  horizon.fillSprite(TFT_BLACK);
+
+  for (int y = 0; y < 240; y++) {
+    for (int x = 0; x < 240; x++) {
+      float dx = x - cx;
+      float dy = y - cy;
+      float rotX = cos(rollRad) * dx - sin(rollRad) * (dy + pitchOffset);
+      float rotY = sin(rollRad) * dx + cos(rollRad) * (dy + pitchOffset);
+      uint16_t color = (rotY < 0) ? TFT_NAVY : TFT_GREEN;
+      horizon.drawPixel(x, y, color);
+    }
+  }
+
+  for (int i = -3; i <= 3; i++) {
+    if (i == 0) continue;
+    float offset = i * 20;
+    desenharLinhaPitch(cx, cy, offset, rollRad);
+  }
+
+  horizon.fillTriangle(cx, cy - 119, cx - 6, cy - 109, cx + 6, cy - 109, TFT_WHITE);
+  int vSize = 10;
+  horizon.drawLine(cx - vSize, cy, cx, cy + vSize, TFT_WHITE);
+  horizon.drawLine(cx + vSize, cy, cx, cy + vSize, TFT_WHITE);
+  horizon.drawLine(20, cy, cx - vSize, cy, TFT_WHITE);
+  horizon.drawLine(cx + vSize, cy, 220, cy, TFT_WHITE);
+  horizon.drawCircle(cx, cy, 119, TFT_WHITE);
+
+  for (int angle = -60; angle <= 60; angle += 30) {
+    float rad = angle * DEG_TO_RAD;
+    int x1 = cx + cos(rad - HALF_PI) * 110;
+    int y1 = cy + sin(rad - HALF_PI) * 110;
+    int x2 = cx + cos(rad - HALF_PI) * 119;
+    int y2 = cy + sin(rad - HALF_PI) * 119;
+    horizon.drawLine(x1, y1, x2, y2, TFT_WHITE);
+  }
+
+  if (mostrarDist >= 0) {
+    horizon.setTextDatum(MC_DATUM);
+    horizon.setTextSize(2);
+    horizon.setTextColor(TFT_WHITE, TFT_BLACK);
+    horizon.drawString(String(mostrarDist, 1) + " cm", cx, cy - 90);
+  }
+
+  horizon.pushSprite(0, 0);
+}
+
+void desenharLinhaPitch(int cx, int cy, float offset, float rollRad) {
+  float length = 40;
+  float x1 = -length / 2;
+  float y1 = offset;
+  float x2 = length / 2;
+  float y2 = offset;
+
+  int x1r = cx + cos(rollRad) * x1 - sin(rollRad) * y1;
+  int y1r = cy + sin(rollRad) * x1 + cos(rollRad) * y1;
+  int x2r = cx + cos(rollRad) * x2 - sin(rollRad) * y2;
+  int y2r = cy + sin(rollRad) * x2 + cos(rollRad) * y2;
+
+  horizon.drawLine(x1r, y1r, x2r, y2r, TFT_WHITE);
+}
